@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
 :root {
   /* Clean Palette - Light Mode Default */
   --primary: #2563eb;
@@ -41,7 +39,7 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-  font-family: 'Inter', system-ui, sans-serif;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   background: var(--bg);
   color: var(--text);
   min-height: 100vh;
@@ -329,5 +327,6 @@ select:focus, input:focus, textarea:focus {
 }
 .workspace-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
 }

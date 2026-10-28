@@ -38,39 +38,46 @@ const DEFAULT_SETTINGS = {
   autoCleanupIntervalMin: 30,
   autoDiscard: false,
   autoDiscardThresholdMin: 60,
+  autoBackup: false,
   defaultSortMode: "domain", // domain | title | recent | pinned
   defaultSnoozeValue: 60,
   defaultSnoozeUnit: "minutes", // minutes | hours
 };
 
-chrome.runtime.onInstalled.addListener(() => {
+browserAPI.runtime.onInstalled.addListener(() => {
   void initializeExtension();
-  chrome.contextMenus.create({
-    id: MENU_ID_CLOSE_DUPLICATES,
-    title: "Close all duplicates of this tab",
-    contexts: ["page"],
-  });
+  void browserAPI.contextMenus
+    .removeAll()
+    .then(() =>
+      browserAPI.contextMenus.create({
+        id: MENU_ID_CLOSE_DUPLICATES,
+        title: "Close all duplicates of this tab",
+        contexts: ["page"],
+      })
+    )
+    .catch((err) => console.warn("[TabManager] Could not create context menu:", err?.message || err));
 });
 
-chrome.runtime.onStartup.addListener(() => {
+browserAPI.runtime.onStartup.addListener(() => {
   void initializeExtension();
 });
 
-chrome.storage.onChanged.addListener((changes, areaName) => {
+browserAPI.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "sync" || !changes[STORAGE_KEYS.settings]) return;
   const nextSettings = normalizeSettings(changes[STORAGE_KEYS.settings].newValue || {});
   void syncAutoCleanupAlarm(nextSettings);
   void syncAutoDiscardAlarm(nextSettings);
+  void syncAutoBackupAlarm(nextSettings);
   void updateAutoCleanupBadge(nextSettings);
 });
 
-chrome.contextMenus.onClicked.addListener((info, tab) => {
+browserAPI.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === MENU_ID_CLOSE_DUPLICATES && tab?.url) {
     void closeDuplicatesOfTab(tab);
   }
 });
 
-chrome.alarms.onAlarm.addListener((alarm) => {
+browserAPI.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_AUTO_BACKUP) {
     void runAutoBackup();
     return;
@@ -94,11 +101,11 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-chrome.commands.onCommand.addListener((command) => {
+browserAPI.commands.onCommand.addListener((command) => {
   void handleCommand(command);
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+browserAPI.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   void (async () => {
     const action = message?.action;
 
@@ -237,7 +244,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
       case "closeTab":
         try {
-          await chrome.tabs.remove(message.tabId);
+          await browserAPI.tabs.remove(message.tabId);
           return { success: true };
         } catch (err) {
           return { success: false, error: err.message };
@@ -292,19 +299,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 async function initializeExtension() {
-  console.log("[NanoBanana] tab customization initializing...");
+  console.log("[TabManager] initializing...");
   const settings = await getSettings();
-  await chrome.storage.sync.set({ [STORAGE_KEYS.settings]: settings });
+  await browserAPI.storage.sync.set({ [STORAGE_KEYS.settings]: settings });
   await syncAutoCleanupAlarm(settings);
   await syncAutoDiscardAlarm(settings);
+  await syncAutoBackupAlarm(settings);
   await rescheduleSnoozeAlarms();
   await updateAutoCleanupBadge(settings);
-  await chrome.alarms.create(ALARM_AUTO_BACKUP, { periodInMinutes: 15 });
 }
 
 async function runAutoBackup() {
   try {
-    const tabs = await chrome.tabs.query({});
+    const settings = await getSettings();
+    if (!settings.autoBackup) return;
+
+    const tabs = await browserAPI.tabs.query({});
     const capturedTabs = tabs
       .filter((tab) => tab?.url && isSupportedTabUrl(tab.url))
       .map((tab) => ({
@@ -344,7 +354,7 @@ async function runAutoBackup() {
       workspaces.length = WORKSPACE_LIMIT;
     }
 
-    await chrome.storage.local.set({ [STORAGE_KEYS.workspaces]: workspaces });
+    await browserAPI.storage.local.set({ [STORAGE_KEYS.workspaces]: workspaces });
   } catch (err) {
     console.error("[TabManager] Auto-Backup failed:", err);
   }
@@ -352,10 +362,14 @@ async function runAutoBackup() {
 
 async function runZenMode() {
   try {
-    const allTabs = await chrome.tabs.query({});
-    
-    // Only stash tabs that are not active and not pinned
-    const tabsToStash = allTabs.filter(tab => !tab.active && !tab.pinned && tab.url && isSupportedTabUrl(tab.url));
+    const settings = await getSettings();
+    const excludedDomains = parseExcludedDomains(settings.excludedDomains);
+    const allTabs = await browserAPI.tabs.query({});
+
+    // Only stash tabs the user's exclusion rules allow
+    const tabsToStash = allTabs.filter(
+      (tab) => !tab.active && !tab.pinned && !shouldExcludeTab(tab, settings, excludedDomains)
+    );
     const tabIdsToClose = tabsToStash.map(t => t.id);
     
     if (tabsToStash.length === 0) {
@@ -384,10 +398,10 @@ async function runZenMode() {
       workspaces.length = WORKSPACE_LIMIT;
     }
 
-    await chrome.storage.local.set({ [STORAGE_KEYS.workspaces]: workspaces });
+    await browserAPI.storage.local.set({ [STORAGE_KEYS.workspaces]: workspaces });
     
     // Close the stashed tabs
-    await chrome.tabs.remove(tabIdsToClose);
+    await browserAPI.tabs.remove(tabIdsToClose);
     
     return { success: true, stashedCount: tabsToStash.length };
   } catch (err) {
@@ -466,6 +480,8 @@ function normalizeSettings(rawSettings) {
     ? clamp(discardThreshold, 1, 1440)
     : DEFAULT_SETTINGS.autoDiscardThresholdMin;
 
+  normalized.autoBackup = Boolean(normalized.autoBackup);
+
   const sortModes = new Set(["domain", "title", "recent", "pinned"]);
   if (!sortModes.has(normalized.defaultSortMode)) {
     normalized.defaultSortMode = DEFAULT_SETTINGS.defaultSortMode;
@@ -484,12 +500,22 @@ function normalizeSettings(rawSettings) {
 }
 
 async function syncAutoDiscardAlarm(settings) {
-  await chrome.alarms.clear(ALARM_AUTO_DISCARD);
+  await browserAPI.alarms.clear(ALARM_AUTO_DISCARD);
 
   if (!settings.autoDiscard) return;
 
-  await chrome.alarms.create(ALARM_AUTO_DISCARD, {
+  await browserAPI.alarms.create(ALARM_AUTO_DISCARD, {
     periodInMinutes: 5, // Scan for idle tabs every 5 minutes
+  });
+}
+
+async function syncAutoBackupAlarm(settings) {
+  await browserAPI.alarms.clear(ALARM_AUTO_BACKUP);
+
+  if (!settings.autoBackup) return;
+
+  await browserAPI.alarms.create(ALARM_AUTO_BACKUP, {
+    periodInMinutes: 15,
   });
 }
 
@@ -497,7 +523,7 @@ async function runAutoDiscardScan(force = false) {
   const settings = await getSettings();
   if (!settings.autoDiscard && !force) return { success: true, discarded: 0 };
 
-  const tabs = await chrome.tabs.query({ active: false, discarded: false });
+  const tabs = await browserAPI.tabs.query({ active: false, discarded: false });
   const now = Date.now();
   const thresholdMs = settings.autoDiscardThresholdMin * 60 * 1000;
 
@@ -510,10 +536,10 @@ async function runAutoDiscardScan(force = false) {
 
     if (shouldDiscard) {
       try {
-        await chrome.tabs.discard(tab.id);
+        await browserAPI.tabs.discard(tab.id);
         discarded += 1;
       } catch (err) {
-        console.warn(`[NanoBanana] Could not discard tab ${tab.id}:`, err.message);
+        console.warn(`[TabManager] Could not discard tab ${tab.id}:`, err.message);
       }
     }
   }
@@ -523,16 +549,28 @@ async function runAutoDiscardScan(force = false) {
 
 async function closeDuplicatesOfTab(tab) {
   const settings = await getSettings();
-  const allTabs = await chrome.tabs.query({});
+  const excludedDomains = parseExcludedDomains(settings.excludedDomains);
+
+  if (shouldExcludeTab(tab, settings, excludedDomains)) {
+    return { success: false, error: "This tab is excluded from cleanup." };
+  }
+
+  const tabs = await getTabsForScope({
+    scope: settings.scope,
+    currentWindowId: tab.windowId,
+  });
   const targetKey = normalizeUrlForMatch(tab.url, settings.duplicateMatchMode);
 
-  if (!targetKey) return;
+  if (!targetKey) {
+    return { success: false, error: "This tab cannot be matched." };
+  }
 
   const toClose = [];
   const undoItems = [];
 
-  for (const other of allTabs) {
+  for (const other of tabs) {
     if (!other.id || other.id === tab.id) continue;
+    if (shouldExcludeTab(other, settings, excludedDomains)) continue;
 
     const key = normalizeUrlForMatch(other.url, settings.duplicateMatchMode);
     if (key === targetKey) {
@@ -548,13 +586,15 @@ async function closeDuplicatesOfTab(tab) {
 
   if (toClose.length > 0) {
     await pushUndoBatch(undoItems);
-    await chrome.tabs.remove(toClose);
+    await browserAPI.tabs.remove(toClose);
     await updateAutoCleanupBadge(settings);
   }
+
+  return { success: true, removed: toClose.length };
 }
 
 async function getSettings() {
-  const stored = await chrome.storage.sync.get(STORAGE_KEYS.settings);
+  const stored = await browserAPI.storage.sync.get(STORAGE_KEYS.settings);
   return normalizeSettings(stored[STORAGE_KEYS.settings]);
 }
 
@@ -565,21 +605,21 @@ async function updateSettings(patch) {
     ...(patch || {}),
   });
 
-  await chrome.storage.sync.set({ [STORAGE_KEYS.settings]: next });
+  await browserAPI.storage.sync.set({ [STORAGE_KEYS.settings]: next });
   await syncAutoCleanupAlarm(next);
   await updateAutoCleanupBadge(next);
   return next;
 }
 
 async function syncAutoCleanupAlarm(settings) {
-  await chrome.alarms.clear(ALARM_AUTO_CLEANUP);
+  await browserAPI.alarms.clear(ALARM_AUTO_CLEANUP);
 
   if (!settings.autoCleanup) {
-    await chrome.action.setBadgeText({ text: "" });
+    await browserAPI.action.setBadgeText({ text: "" });
     return;
   }
 
-  await chrome.alarms.create(ALARM_AUTO_CLEANUP, {
+  await browserAPI.alarms.create(ALARM_AUTO_CLEANUP, {
     periodInMinutes: settings.autoCleanupIntervalMin,
   });
 }
@@ -593,21 +633,24 @@ async function runAutoCleanupScan() {
 
 async function updateAutoCleanupBadge(settings) {
   if (!settings.autoCleanup) {
-    await chrome.action.setBadgeText({ text: "" });
-    await chrome.action.setTitle({ title: "tab customization" });
+    await browserAPI.action.setBadgeText({ text: "" });
+    await browserAPI.action.setTitle({ title: "Tab Manager Pro" });
     return;
   }
 
-  const allTabs = await chrome.tabs.query({});
-  const plan = buildDuplicatePlan(allTabs, settings);
+  const tabs = await getTabsForScope({
+    scope: settings.scope,
+    currentWindowId: await getCurrentWindowId(),
+  });
+  const plan = buildDuplicatePlan(tabs, settings);
   const total = plan.toClose.length;
 
-  await chrome.action.setBadgeBackgroundColor({ color: "#ef4444" });
-  await chrome.action.setBadgeText({ text: total > 0 ? String(Math.min(total, 99)) : "" });
-  await chrome.action.setTitle({
+  await browserAPI.action.setBadgeBackgroundColor({ color: "#ef4444" });
+  await browserAPI.action.setBadgeText({ text: total > 0 ? String(Math.min(total, 99)) : "" });
+  await browserAPI.action.setTitle({
     title: total > 0
-      ? `tab customization (${total} duplicate${total === 1 ? "" : "s"} found)`
-      : "tab customization",
+      ? `Tab Manager Pro (${total} duplicate${total === 1 ? "" : "s"} found)`
+      : "Tab Manager Pro",
   });
 }
 
@@ -703,7 +746,7 @@ async function removeDuplicateTabs({ settings, scope, currentWindowId }) {
   }
 
   await pushUndoBatch(plan.undoItems);
-  await chrome.tabs.remove(plan.toClose);
+  await browserAPI.tabs.remove(plan.toClose);
 
   const remainingTabs = await getTabsForScope({ scope, currentWindowId });
   await updateAutoCleanupBadge(settings);
@@ -796,7 +839,7 @@ async function undoLastRemoval() {
   }
 
   const [entry, ...rest] = undoStack;
-  await chrome.storage.local.set({ [STORAGE_KEYS.undoStack]: rest });
+  await browserAPI.storage.local.set({ [STORAGE_KEYS.undoStack]: rest });
 
   let restored = 0;
 
@@ -815,11 +858,11 @@ async function undoLastRemoval() {
     }
 
     try {
-      await chrome.tabs.create(createInfo);
+      await browserAPI.tabs.create(createInfo);
       restored += 1;
     } catch {
       const fallbackWindowId = await getCurrentWindowId();
-      await chrome.tabs.create({
+      await browserAPI.tabs.create({
         url: item.url,
         active: false,
         pinned: Boolean(item.pinned),
@@ -840,7 +883,7 @@ async function undoLastRemoval() {
 }
 
 async function getUndoStack() {
-  const stored = await chrome.storage.local.get(STORAGE_KEYS.undoStack);
+  const stored = await browserAPI.storage.local.get(STORAGE_KEYS.undoStack);
   const stack = stored[STORAGE_KEYS.undoStack];
   return Array.isArray(stack) ? stack : [];
 }
@@ -888,7 +931,7 @@ async function setGroupsCollapsed({ collapsed, scope, currentWindowId }) {
 }
 
 async function listWorkspaces() {
-  const stored = await chrome.storage.local.get(STORAGE_KEYS.workspaces);
+  const stored = await browserAPI.storage.local.get(STORAGE_KEYS.workspaces);
   const workspaces = stored[STORAGE_KEYS.workspaces];
   if (!Array.isArray(workspaces)) return [];
 
@@ -930,7 +973,7 @@ async function saveWorkspace({ name, scope, currentWindowId }) {
     workspaces.length = WORKSPACE_LIMIT;
   }
 
-  await chrome.storage.local.set({ [STORAGE_KEYS.workspaces]: workspaces });
+  await browserAPI.storage.local.set({ [STORAGE_KEYS.workspaces]: workspaces });
 
   return {
     success: true,
@@ -959,7 +1002,7 @@ async function restoreWorkspace({ id, currentWindowId }) {
   for (const tab of workspace.tabs) {
     if (!tab?.url || !isSupportedTabUrl(tab.url)) continue;
 
-    await chrome.tabs.create({
+    await browserAPI.tabs.create({
       windowId: targetWindowId,
       url: tab.url,
       active: false,
@@ -987,7 +1030,7 @@ async function deleteWorkspace(id) {
     return { success: false, error: "Workspace not found." };
   }
 
-  await chrome.storage.local.set({ [STORAGE_KEYS.workspaces]: next });
+  await browserAPI.storage.local.set({ [STORAGE_KEYS.workspaces]: next });
 
   return {
     success: true,
@@ -1054,7 +1097,7 @@ async function importWorkspaces(payload) {
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
     .slice(0, WORKSPACE_LIMIT);
 
-  await chrome.storage.local.set({ [STORAGE_KEYS.workspaces]: merged });
+  await browserAPI.storage.local.set({ [STORAGE_KEYS.workspaces]: merged });
 
   return {
     success: true,
@@ -1064,7 +1107,8 @@ async function importWorkspaces(payload) {
 }
 
 async function searchTabs({ query, sortBy, sortDirection, scope, currentWindowId }) {
-  const tabs = await getTabsForScope({ scope, currentWindowId });
+  const scopedTabs = await getTabsForScope({ scope, currentWindowId });
+  const tabs = scopedTabs.filter((tab) => tab?.url && isSupportedTabUrl(tab.url));
   const normalizedQuery = String(query || "").trim().toLowerCase();
 
   let filtered = tabs;
@@ -1086,6 +1130,8 @@ async function searchTabs({ query, sortBy, sortDirection, scope, currentWindowId
     favIconUrl: tab.favIconUrl || "",
     pinned: Boolean(tab.pinned),
     active: Boolean(tab.active),
+    audible: Boolean(tab.audible),
+    discarded: Boolean(tab.discarded),
     lastAccessed: tab.lastAccessed || 0,
   }));
 
@@ -1101,10 +1147,10 @@ async function focusTab(tabId, windowId) {
     return { success: false, error: "tabId is required." };
   }
 
-  await chrome.tabs.update(tabId, { active: true });
+  await browserAPI.tabs.update(tabId, { active: true });
 
   if (Number.isInteger(windowId)) {
-    await chrome.windows.update(windowId, { focused: true });
+    await browserAPI.windows.update(windowId, { focused: true });
   }
 
   return { success: true };
@@ -1133,7 +1179,7 @@ async function sortTabs({ sortBy, sortDirection, scope, currentWindowId }) {
     if (ordered.length < 2) continue;
 
     const ids = ordered.map((tab) => tab.id);
-    await chrome.tabs.move(ids, { windowId, index: 0 });
+    await browserAPI.tabs.move(ids, { windowId, index: 0 });
     windowsSorted += 1;
   }
 
@@ -1150,8 +1196,10 @@ function createTabComparator(sortBy, sortDirection = "asc") {
     return (a, b) => multiplier * String(a.title || "").localeCompare(String(b.title || ""));
   }
 
-    // For time: asc = oldest first (lower value first), desc = newest first (higher value first)
+  if (sortBy === "recent") {
+    // asc = oldest first, desc = newest first
     return (a, b) => multiplier * ((a.lastAccessed || 0) - (b.lastAccessed || 0));
+  }
 
   if (sortBy === "pinned") {
     return (a, b) => {
@@ -1176,7 +1224,7 @@ async function snoozeTab({ tabId, durationMinutes }) {
     return { success: false, error: "tabId is required." };
   }
 
-  const tab = await chrome.tabs.get(tabId);
+  const tab = await browserAPI.tabs.get(tabId);
   if (!tab?.url || !isSupportedTabUrl(tab.url)) {
     return { success: false, error: "This tab cannot be snoozed." };
   }
@@ -1196,9 +1244,9 @@ async function snoozeTab({ tabId, durationMinutes }) {
   const snoozedTabs = await getSnoozedTabs();
   snoozedTabs.push(entry);
 
-  await chrome.storage.local.set({ [STORAGE_KEYS.snoozedTabs]: snoozedTabs });
-  await chrome.alarms.create(`${ALARM_SNOOZE_PREFIX}${entry.id}`, { when: wakeAt });
-  await chrome.tabs.remove(tabId);
+  await browserAPI.storage.local.set({ [STORAGE_KEYS.snoozedTabs]: snoozedTabs });
+  await browserAPI.alarms.create(`${ALARM_SNOOZE_PREFIX}${entry.id}`, { when: wakeAt });
+  await browserAPI.tabs.remove(tabId);
 
   return {
     success: true,
@@ -1212,19 +1260,19 @@ async function wakeSnoozedTab(snoozeId) {
   if (!entry) return;
 
   try {
-    await chrome.tabs.create({
+    await browserAPI.tabs.create({
       url: entry.tab.url,
       active: false,
       pinned: Boolean(entry.tab.pinned),
     });
   } finally {
     const rest = snoozedTabs.filter((item) => item.id !== snoozeId);
-    await chrome.storage.local.set({ [STORAGE_KEYS.snoozedTabs]: rest });
+    await browserAPI.storage.local.set({ [STORAGE_KEYS.snoozedTabs]: rest });
   }
 }
 
 async function getSnoozedTabs() {
-  const stored = await chrome.storage.local.get(STORAGE_KEYS.snoozedTabs);
+  const stored = await browserAPI.storage.local.get(STORAGE_KEYS.snoozedTabs);
   const snoozedTabs = stored[STORAGE_KEYS.snoozedTabs];
   return Array.isArray(snoozedTabs) ? snoozedTabs : [];
 }
@@ -1242,7 +1290,7 @@ async function rescheduleSnoozeAlarms() {
       continue;
     }
 
-    await chrome.alarms.create(alarmName, { when: entry.wakeAt });
+    await browserAPI.alarms.create(alarmName, { when: entry.wakeAt });
   }
 }
 
@@ -1408,18 +1456,18 @@ function getBaseDomain(hostname) {
 
 async function getTabsForScope({ scope, currentWindowId }) {
   if (scope === "allWindows") {
-    return chrome.tabs.query({});
+    return browserAPI.tabs.query({});
   }
 
   const windowId = Number.isFinite(currentWindowId)
     ? currentWindowId
     : await getCurrentWindowId();
 
-  return chrome.tabs.query({ windowId });
+  return browserAPI.tabs.query({ windowId });
 }
 
 async function getCurrentWindowId() {
-  const win = await chrome.windows.getLastFocused({ populate: false });
+  const win = await browserAPI.windows.getLastFocused({ populate: false });
   return win.id;
 }
 

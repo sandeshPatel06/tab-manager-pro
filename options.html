@@ -4,7 +4,6 @@
 <head>
   <meta charset="UTF-8">
   <title>Tab Manager Pro - Settings</title>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="options.css">
 </head>
 
@@ -13,7 +12,7 @@
     <aside class="sidebar">
       <div class="logo">
         <img src="icons/icon48.png" alt="icon">
-        <span>Tab Manager</span>
+        <span>Tab Manager Pro</span>
       </div>
       <nav class="nav">
         <div class="nav-item active" data-section="general">
@@ -81,6 +80,22 @@
                 <option value="currentWindow">Current Window Only</option>
                 <option value="allWindows">All Open Windows</option>
               </select>
+            </div>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect></svg>
+              </div>
+              <div class="setting-text-group">
+                <label>Tab Group Visibility</label>
+                <p class="help-text">Collapse every tab group in scope to hide its tabs, or expand them all again.</p>
+              </div>
+            </div>
+            <div class="setting-control">
+              <button id="btn-collapse-groups" class="btn btn-secondary">Collapse</button>
+              <button id="btn-expand-groups" class="btn btn-primary">Expand</button>
             </div>
           </div>
 
@@ -207,6 +222,21 @@
               </div>
             </div>
           </div>
+
+          <div class="setting-row column">
+            <div class="setting-info" style="width: 100%; padding-right: 0;">
+              <div class="setting-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+              </div>
+              <label class="checkbox-wrap">
+                <input type="checkbox" id="auto-backup">
+                <div class="setting-text-group">
+                  <label>Enable Workspace Auto-Backup</label>
+                  <p class="help-text">Saves a snapshot of all open tabs every 15 minutes as a workspace. The three newest auto-backups are kept.</p>
+                </div>
+              </label>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -241,7 +271,7 @@
               </div>
               <div class="setting-text-group">
                 <label>Stored Sessions</label>
-                <p class="help-text">Manage your previously saved tab sessions. You can restore them to a new window or delete ones you no longer need.</p>
+                <p class="help-text">Manage your previously saved tab sessions. You can restore them into the current window or delete ones you no longer need.</p>
               </div>
             </div>
             <div class="setting-control" style="width: 100%; flex-direction: column;">
@@ -249,6 +279,9 @@
               <div class="workspace-actions">
                 <button id="btn-restore-workspace" class="btn btn-primary">Restore Selected</button>
                 <button id="btn-delete-workspace" class="btn btn-secondary">Delete Session</button>
+                <button id="btn-export-workspaces" class="btn btn-secondary">Export All</button>
+                <button id="btn-import-workspaces" class="btn btn-secondary">Import JSON</button>
+                <input type="file" id="import-workspaces-file" accept="application/json,.json" hidden>
               </div>
             </div>
           </div>

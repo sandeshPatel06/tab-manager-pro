@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "Tab Manager",
+  "name": "Tab Manager Pro",
   "short_name": "TabManager",
   "author": "Sandesh Patel",
-  "version": "2.0.0",
-  "description": "Advanced tab manager: grouping, duplicate cleanup, workspace sessions, search, snooze, and automation.",
+  "version": "2.1.0",
+  "description": "Tab Manager Pro: group tabs, close duplicates, save workspaces, snooze tabs, and hibernate idle tabs in Chrome & Firefox.",
+  "homepage_url": "https://github.com/sandeshPatel06/tab-manager-pro",
   "offline_enabled": true,
   "browser_specific_settings": {
     "gecko": {
@@ -24,7 +25,7 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Tab Manager",
+    "default_title": "Tab Manager Pro",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -39,6 +40,7 @@
     "128": "icons/icon128.png"
   },
   "background": {
+    "scripts": ["background.js"],
     "service_worker": "background.js"
   },
   "options_ui": {

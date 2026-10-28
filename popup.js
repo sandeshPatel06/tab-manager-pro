@@ -28,8 +28,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (initData.success) {
       cachedSettings = initData.settings || {};
       updateUndoButton(initData.undoDepth || 0);
-      updateTabCount();
-      loadTabs(); // Replace runSearch with loadTabs
+      loadTabs();
+    } else {
+      showStatus(initData.error || 'Could not load tabs', 'error');
     }
   }
 
@@ -45,15 +46,6 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /**
-   * Fetches the current tab count from the browser and updates the header UI.
-   */
-  async function updateTabCount() {
-    const query = cachedSettings.scope === 'allWindows' ? {} : { windowId: currentWindowId };
-    const tabs = await browserAPI.tabs.query(query);
-    els.tabCount.textContent = `${tabs.length} Tab${tabs.length === 1 ? '' : 's'}`;
-  }
-
-  /**
    * Displays a temporary status toast message to the user.
    * @param {string} msg - The message to display.
    * @param {string} tone - 'success' or 'error'.
@@ -64,11 +56,12 @@ document.addEventListener('DOMContentLoaded', () => {
     setTimeout(() => els.status.classList.remove('show'), 3000);
   }
 
-  // Messaging helper
-  function sendMessage(msg) {
-    return new Promise(resolve => {
-      browserAPI.runtime.sendMessage(msg, resolve);
-    });
+  async function sendMessage(msg) {
+    try {
+      return await browserAPI.runtime.sendMessage(msg);
+    } catch (err) {
+      return { success: false, error: err?.message || String(err) };
+    }
   }
 
   // Bind Events
@@ -84,7 +77,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     if (result.success) {
       showStatus(result.groupsCreated > 0 ? `${result.groupsCreated} Groups created` : 'No groups created');
-      updateTabCount();
     }
   });
 
@@ -97,7 +89,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (result.success) {
       showStatus(result.removed > 0 ? `${result.removed} Duplicates removed` : 'No duplicates found');
       updateUndoButton(result.undoDepth || 0);
-      updateTabCount();
       loadTabs();
     }
   });
@@ -107,7 +98,6 @@ document.addEventListener('DOMContentLoaded', () => {
       const result = await sendMessage({ action: 'zenMode' });
       if (result.success) {
         showStatus(`${result.stashedCount} tabs stashed in Zen Mode.`);
-        updateTabCount();
         loadTabs();
       } else {
         showStatus(result.error || 'No background tabs to stash.', 'error');
@@ -120,18 +110,18 @@ document.addEventListener('DOMContentLoaded', () => {
     if (result.success) {
       showStatus(`${result.restored} Tab(s) restored`);
       updateUndoButton(result.undoDepth || 0);
-      updateTabCount();
       loadTabs();
     }
   });
 
   els.btnSort.addEventListener('click', async () => {
-    const result = await sendMessage({ 
-      action: 'sortTabs', 
-      sortBy: 'domain', 
-      sortDirection: 'asc', 
-      scope: cachedSettings.scope, 
-      currentWindowId 
+    const sortBy = cachedSettings.defaultSortMode || 'domain';
+    const result = await sendMessage({
+      action: 'sortTabs',
+      sortBy,
+      sortDirection: sortBy === 'recent' ? 'desc' : 'asc',
+      scope: cachedSettings.scope,
+      currentWindowId
     });
     if (result.success) {
       showStatus(`Tabs sorted`);
@@ -145,32 +135,39 @@ document.addEventListener('DOMContentLoaded', () => {
    */
   let searchTimeout;
   async function loadTabs() {
-    // Load Open Tabs
+    const sortBy = cachedSettings.defaultSortMode || 'domain';
     const openResult = await sendMessage({
       action: 'searchTabs',
-      query: '', // All tabs
-      sortBy: cachedSettings.defaultSortMode || 'domain',
-      sortDirection: 'asc',
+      query: '',
+      sortBy,
+      sortDirection: sortBy === 'recent' ? 'desc' : 'asc',
       scope: cachedSettings.scope,
       currentWindowId
     });
 
-    if (openResult.success) {
-      renderTabList(els.openTabsList, openResult.results || [], true);
-      
-      // Setup Search Filtering with Debouncing (Memory/CPU optimization)
-      els.tabSearch.oninput = (e) => {
-        clearTimeout(searchTimeout);
-        searchTimeout = setTimeout(() => {
-          const query = e.target.value.toLowerCase();
-          const filtered = openResult.results.filter(t => 
-            (t.title || '').toLowerCase().includes(query) || 
-            (t.url || '').toLowerCase().includes(query)
-          );
-          renderTabList(els.openTabsList, filtered, true);
-        }, 250);
-      };
+    if (!openResult.success) {
+      showStatus(openResult.error || 'Could not load tabs', 'error');
+      return;
     }
+
+    const total = Number.isFinite(openResult.total)
+      ? openResult.total
+      : (openResult.results || []).length;
+    els.tabCount.textContent = `${total} Tab${total === 1 ? '' : 's'}`;
+    renderTabList(els.openTabsList, openResult.results || []);
+
+    // Filter locally: the background already returned the matching scope.
+    els.tabSearch.oninput = (e) => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => {
+        const query = e.target.value.toLowerCase();
+        const filtered = openResult.results.filter(t =>
+          (t.title || '').toLowerCase().includes(query) ||
+          (t.url || '').toLowerCase().includes(query)
+        );
+        renderTabList(els.openTabsList, filtered);
+      }, 250);
+    };
   }
 
   // Event Delegation for maximum performance (O(1) memory instead of O(N) closures)
@@ -180,23 +177,36 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const tabId = parseInt(row.dataset.tabId, 10);
     const windowId = parseInt(row.dataset.windowId, 10);
-    const url = row.dataset.url;
-    
+
     if (e.target.closest('.close-btn')) {
       e.stopPropagation();
-      await browserAPI.runtime.sendMessage({ action: 'closeTab', tabId });
-      loadTabs();
-      updateTabCount();
+      const result = await sendMessage({ action: 'closeTab', tabId });
+      if (result.success) {
+        loadTabs();
+      } else {
+        showStatus(result.error || 'Could not close tab', 'error');
+      }
       return;
     }
 
-    if (row.dataset.isOpen === 'true') {
-      browserAPI.runtime.sendMessage({ action: 'focusTab', tabId, windowId });
-      window.close();
-    } else {
-      await browserAPI.tabs.create({ url, active: false });
-      loadTabs();
+    if (e.target.closest('.snooze-btn')) {
+      e.stopPropagation();
+      const value = Number(cachedSettings.defaultSnoozeValue) || 60;
+      const unit = cachedSettings.defaultSnoozeUnit === 'hours' ? 'hours' : 'minutes';
+      const durationMinutes = unit === 'hours' ? value * 60 : value;
+      const result = await sendMessage({ action: 'snoozeTab', tabId, durationMinutes });
+
+      if (result.success) {
+        showStatus(`Tab snoozed for ${value} ${unit}`);
+        loadTabs();
+      } else {
+        showStatus(result.error || 'Could not snooze tab', 'error');
+      }
+      return;
     }
+
+    browserAPI.runtime.sendMessage({ action: 'focusTab', tabId, windowId });
+    window.close();
   });
 
   // Handle broken favicons without violating MV3 CSP (no inline onerror)
@@ -207,31 +217,18 @@ document.addEventListener('DOMContentLoaded', () => {
   }, true); // true for capture phase, as error events do not bubble
 
   /**
-   * Escapes HTML characters to prevent XSS attacks and DOM breakage.
-   */
-  function escapeHTML(str) {
-    if (!str) return '';
-    return String(str)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#039;");
-  }
-
-  /**
    * Renders tab lists efficiently using DocumentFragment to prevent DOM layout thrashing.
    */
-  function renderTabList(container, tabs, isOpen) {
+  function renderTabList(container, tabs) {
     container.innerHTML = '';
-    
+
     if (!tabs.length) {
       const emptyMsg = document.createElement('div');
       emptyMsg.className = 'result-item';
       emptyMsg.style.justifyContent = 'center';
       emptyMsg.style.color = 'var(--muted)';
       emptyMsg.style.fontSize = '12px';
-      emptyMsg.textContent = `No ${isOpen ? 'open' : 'closed'} tabs`;
+      emptyMsg.textContent = 'No open tabs';
       container.appendChild(emptyMsg);
       return;
     }
@@ -243,8 +240,6 @@ document.addEventListener('DOMContentLoaded', () => {
       row.className = `result-item ${tab.audible ? 'audible' : ''}`;
       row.dataset.tabId = tab.id;
       row.dataset.windowId = tab.windowId;
-      row.dataset.url = tab.url || '';
-      row.dataset.isOpen = isOpen;
       
       const faviconUrl = tab.favIconUrl || 'icons/icon16.png';
       
@@ -279,13 +274,8 @@ document.addEventListener('DOMContentLoaded', () => {
         indicators.innerHTML += '<svg class="tag-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>';
       }
 
-      // Add buttons based on state
       const btnContainer = row.querySelector('.btn-container');
-      if (isOpen) {
-        btnContainer.innerHTML = '<button class="mini-btn focus-btn" title="Focus Tab"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg></button><button class="mini-btn close-btn" title="Close Tab"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>';
-      } else {
-        btnContainer.innerHTML = '<button class="mini-btn restore-btn" title="Restore Tab"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path><path d="M21 3v5h-5"></path><polyline points="12 8 12 12 15 15"></polyline></svg></button>';
-      }
+      btnContainer.innerHTML = '<button class="mini-btn snooze-btn" title="Snooze Tab"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg></button><button class="mini-btn focus-btn" title="Focus Tab"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg></button><button class="mini-btn close-btn" title="Close Tab"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>';
       
       fragment.appendChild(row);
     });

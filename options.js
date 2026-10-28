@@ -12,16 +12,13 @@ document.addEventListener('DOMContentLoaded', () => {
     workspaceName: document.getElementById('workspace-name'),
     btnSaveWorkspace: document.getElementById('btn-save-workspace'),
     btnRestoreWorkspace: document.getElementById('btn-restore-workspace'),
-    btnDeleteWorkspace: document.getElementById('btn-delete-workspace')
+    btnDeleteWorkspace: document.getElementById('btn-delete-workspace'),
+    btnExportWorkspaces: document.getElementById('btn-export-workspaces'),
+    btnImportWorkspaces: document.getElementById('btn-import-workspaces'),
+    importFile: document.getElementById('import-workspaces-file'),
+    btnCollapseGroups: document.getElementById('btn-collapse-groups'),
+    btnExpandGroups: document.getElementById('btn-expand-groups')
   };
-
-  const configIds = [
-    'default-sort-mode', 'default-snooze-value', 'default-snooze-unit',
-    'scope', 'duplicate-mode', 'keep-rule', 'exclude-pinned', 
-    'exclude-muted', 'exclude-audible', 'excluded-domains',
-    'auto-cleanup', 'auto-cleanup-interval', 'auto-discard', 
-    'auto-discard-threshold', 'group-preset', 'custom-group-rules'
-  ];
 
   // Init
   async function init() {
@@ -53,6 +50,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('auto-cleanup-interval').value = s.autoCleanupIntervalMin || 30;
     document.getElementById('auto-discard').checked = !!s.autoDiscard;
     document.getElementById('auto-discard-threshold').value = s.autoDiscardThresholdMin || 60;
+    document.getElementById('auto-backup').checked = !!s.autoBackup;
     
     document.getElementById('custom-group-rules').value = s.customGroupRules || '';
   }
@@ -77,14 +75,17 @@ document.addEventListener('DOMContentLoaded', () => {
       autoCleanupIntervalMin: parseInt(document.getElementById('auto-cleanup-interval').value),
       autoDiscard: document.getElementById('auto-discard').checked,
       autoDiscardThresholdMin: parseInt(document.getElementById('auto-discard-threshold').value),
-      
+      autoBackup: document.getElementById('auto-backup').checked,
+
       customGroupRules: document.getElementById('custom-group-rules').value
     };
 
     const result = await sendMessage({ action: 'updateSettings', settings });
-    if (result.success) {
-      showStatus('Settings Applied Successfully');
-    }
+    showStatus(
+      result.success
+        ? 'Settings Applied Successfully'
+        : result.error || 'Could not save settings'
+    );
   }
 
   // Workspaces
@@ -108,10 +109,12 @@ document.addEventListener('DOMContentLoaded', () => {
     setTimeout(() => els.status.classList.remove('show'), 3000);
   }
 
-  function sendMessage(msg) {
-    return new Promise(resolve => {
-      browserAPI.runtime.sendMessage(msg, resolve);
-    });
+  async function sendMessage(msg) {
+    try {
+      return await browserAPI.runtime.sendMessage(msg);
+    } catch (err) {
+      return { success: false, error: err?.message || String(err) };
+    }
   }
 
   // Events
@@ -144,6 +147,65 @@ document.addEventListener('DOMContentLoaded', () => {
       showStatus('Workspace Deleted');
     }
   });
+
+  els.btnExportWorkspaces.addEventListener('click', async () => {
+    const result = await sendMessage({ action: 'exportWorkspaces' });
+    if (!result.success) {
+      showStatus(result.error || 'Could not export workspaces');
+      return;
+    }
+
+    const blob = new Blob([JSON.stringify(result.data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `tab-manager-workspaces-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showStatus('Workspaces exported');
+  });
+
+  els.btnImportWorkspaces.addEventListener('click', () => {
+    els.importFile.click();
+  });
+
+  els.importFile.addEventListener('change', async () => {
+    const file = els.importFile.files?.[0];
+    if (!file) return;
+
+    const result = await sendMessage({
+      action: 'importWorkspaces',
+      payload: await file.text()
+    });
+    els.importFile.value = '';
+
+    if (result.success) {
+      renderWorkspaces(result.workspaces);
+      showStatus(`Imported ${result.imported} workspace${result.imported === 1 ? '' : 's'}`);
+    } else {
+      showStatus(result.error || 'Could not import workspaces');
+    }
+  });
+
+  function updateGroupCollapse(collapsed) {
+    return async () => {
+      const result = await sendMessage({
+        action: collapsed ? 'collapseGroups' : 'expandGroups',
+        scope: document.getElementById('scope').value
+      });
+
+      showStatus(
+        result.success
+          ? `${collapsed ? 'Collapsed' : 'Expanded'} ${result.updated} group${result.updated === 1 ? '' : 's'}`
+          : result.error || 'Could not update groups'
+      );
+    };
+  }
+
+  els.btnCollapseGroups.addEventListener('click', updateGroupCollapse(true));
+  els.btnExpandGroups.addEventListener('click', updateGroupCollapse(false));
 
   // Sidebar Navigation
   document.querySelectorAll('.nav-item').forEach(item => {
